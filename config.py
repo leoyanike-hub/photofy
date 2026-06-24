@@ -23,6 +23,7 @@ FREE_CREDITS = 5
 SUBSCRIBE_BONUS = 0
 BONUS_TASK = 5
 PRO_DAILY_BONUS = 40                # <-- изменено с 35 на 40
+PRO_SUBSCRIPTION_DURATION = 30
 
 # === ТАРИФЫ ПОДПИСКИ ===
 SUBSCRIPTION_TARIFFS = {

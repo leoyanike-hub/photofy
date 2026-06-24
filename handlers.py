@@ -1,5 +1,4 @@
 import logging
-import os
 import json
 from datetime import datetime, timedelta
 from aiogram import Router, F, types, Bot
@@ -30,10 +29,9 @@ from config import (
     PAYMENT_TOKEN, TARIFFS,
     SUBSCRIPTION_TARIFFS,
     PRO_DAILY_BONUS,
-    PRO_SUBSCRIPTION_DURATION,  # <-- добавлено
+    PRO_SUBSCRIPTION_DURATION,
     BOT_TOKEN
 )
-from yookassa_integration import create_payment
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -289,7 +287,7 @@ async def handle_photo_and_prompt(message: Message, state: FSMContext):
             reply_markup=generate_confirm_keyboard()
         )
 
-# ========== ИСПРАВЛЕННАЯ ФУНКЦИЯ ПОДТВЕРЖДЕНИЯ ГЕНЕРАЦИИ ==========
+# ========== ПОДТВЕРЖДЕНИЕ ГЕНЕРАЦИИ ==========
 @router.callback_query(F.data == "confirm_generate")
 async def cb_confirm_generate(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -411,9 +409,6 @@ async def cb_select_pro_tariff(callback: CallbackQuery):
     if not tariff:
         await callback.answer("Неверный тариф", show_alert=True)
         return
-    days = tariff["days"]
-    price = tariff["price"]  # в копейках
-    price_rub = price // 100
 
     user_id = callback.from_user.id
     sub = db.get_subscription(user_id)
@@ -421,40 +416,78 @@ async def cb_select_pro_tariff(callback: CallbackQuery):
         await callback.answer("У вас уже есть активная PRO подписка!", show_alert=True)
         return
 
-    # Создаём платёж с передачей длительности в metadata
-    payment_id, conf_url = create_payment(
-        amount=price,
-        description=f"PRO подписка на {days} дней",
-        user_id=user_id,
-        payment_type="subscription",
-        duration_days=days
-    )
-    if not payment_id:
-        await callback.message.edit_text("❌ Ошибка при создании платежа. Попробуйте позже.")
+    # Отправляем счёт через send_invoice
+    days = tariff["days"]
+    price = tariff["price"]
+    title = f"PRO подписка на {days} дней"
+    description = f"Ежедневное начисление {PRO_DAILY_BONUS} AI Coin в течение {days} дней."
+    payload = f"sub_{days}d_{price}"
+
+    provider_data = {
+        "receipt": {
+            "items": [
+                {
+                    "description": title,
+                    "quantity": "1.00",
+                    "amount": {
+                        "value": f"{price/100:.2f}",
+                        "currency": "RUB"
+                    },
+                    "vat_code": 1,
+                    "payment_mode": "full_payment",
+                    "payment_subject": "service"
+                }
+            ]
+        }
+    }
+
+    try:
+        await callback.bot.send_invoice(
+            chat_id=user_id,
+            title=title,
+            description=description,
+            payload=payload,
+            provider_token=PAYMENT_TOKEN,
+            currency="RUB",
+            prices=[LabeledPrice(label=title, amount=price)],
+            start_parameter=f"sub_{tariff_key}",
+            need_name=False,
+            need_phone_number=False,
+            need_email=False,
+            need_shipping_address=False,
+            is_flexible=False,
+            provider_data=json.dumps(provider_data)
+        )
+        await callback.answer("💳 Открываю платёжное окно...")
+    except Exception as e:
+        logger.error(f"Ошибка отправки инвойса для подписки: {e}")
+        await callback.message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
         await callback.answer()
-        return
 
-    db.save_payment(payment_id, user_id, price, "pending", f"PRO подписка {days}дн")
-
-    await callback.message.edit_text(
-        f"💳 *Оплата подписки на {days} дней*\n\n"
-        f"Стоимость: {price_rub} ₽\n"
-        f"Перейдите по ссылке для оплаты:\n{conf_url}\n\n"
-        "После оплаты подписка активируется автоматически в течение 1-2 минут.",
-        parse_mode="Markdown",
-        reply_markup=back_keyboard()
-    )
-    await callback.answer()
-
-# === Разовые платежи через Telegram Payments ===
+# === Разовые платежи через Telegram Payments (sendInvoice) ===
 async def send_invoice(callback: CallbackQuery, tariff_key: str):
-    coins, price_kopecks = TARIFFS[tariff_key]
-    title = f"{coins} AI Coin"
-    description = f"Пополнение баланса на {coins} монет."
+    coins, price, label = TARIFFS[tariff_key]
+    title = label
+    description = f"Пополнение баланса на {coins} AI Coin."
     payload = f"pay_{tariff_key}_{coins}"
-    provider_token = PAYMENT_TOKEN
-    currency = "RUB"
-    prices = [LabeledPrice(label=title, amount=price_kopecks)]
+
+    provider_data = {
+        "receipt": {
+            "items": [
+                {
+                    "description": title,
+                    "quantity": "1.00",
+                    "amount": {
+                        "value": f"{price/100:.2f}",
+                        "currency": "RUB"
+                    },
+                    "vat_code": 1,
+                    "payment_mode": "full_payment",
+                    "payment_subject": "service"
+                }
+            ]
+        }
+    }
 
     try:
         await callback.bot.send_invoice(
@@ -462,15 +495,16 @@ async def send_invoice(callback: CallbackQuery, tariff_key: str):
             title=title,
             description=description,
             payload=payload,
-            provider_token=provider_token,
-            currency=currency,
-            prices=prices,
-            start_parameter="test-payment",
+            provider_token=PAYMENT_TOKEN,
+            currency="RUB",
+            prices=[LabeledPrice(label=title, amount=price)],
+            start_parameter=f"pay_{tariff_key}",
             need_name=False,
             need_phone_number=False,
             need_email=False,
             need_shipping_address=False,
             is_flexible=False,
+            provider_data=json.dumps(provider_data)
         )
         await callback.answer("💳 Открываю платёжное окно...")
     except Exception as e:
@@ -498,39 +532,71 @@ async def cb_buy_480(callback: CallbackQuery):
 async def cb_buy_960(callback: CallbackQuery):
     await send_invoice(callback, "buy_960")
 
+# === Обработка предварительной проверки платежа ===
 @router.pre_checkout_query()
 async def pre_checkout_query_handler(query: PreCheckoutQuery):
     await query.answer(ok=True)
 
+# === Обработка успешного платежа ===
 @router.message(F.successful_payment)
 async def successful_payment_handler(message: Message):
     payment = message.successful_payment
     payload = payment.invoice_payload
-    parts = payload.split("_")
-    if len(parts) >= 3:
-        try:
-            coins = int(parts[2])
-        except ValueError:
-            coins = 0
-    else:
-        coins = 0
+    user_id = message.from_user.id
 
-    if coins > 0:
-        user_id = message.from_user.id
-        db.add_credits(user_id, coins)
-        new_balance = db.get_credits(user_id)
-        await message.answer(
-            f"✅ *Оплата прошла успешно!*\n"
-            f"Вам начислено *{coins}* AI Coin.\n"
-            f"Текущий баланс: `{new_balance}` AI Coin.",
-            parse_mode="Markdown",
-            reply_markup=main_menu_keyboard()
-        )
+    if payload.startswith("pay_"):
+        # Разовая покупка токенов
+        parts = payload.split("_")
+        if len(parts) >= 3:
+            try:
+                coins = int(parts[2])
+                db.add_credits(user_id, coins)
+                new_balance = db.get_credits(user_id)
+                await message.answer(
+                    f"✅ *Оплата прошла успешно!*\n"
+                    f"Вам начислено *{coins}* AI Coin.\n"
+                    f"Текущий баланс: `{new_balance}` AI Coin.",
+                    parse_mode="Markdown",
+                    reply_markup=main_menu_keyboard()
+                )
+                return
+            except ValueError:
+                pass
+        await message.answer("⚠️ Ошибка при начислении монет. Обратитесь к администратору.")
+    elif payload.startswith("sub_"):
+        # Подписка
+        parts = payload.split("_")
+        if len(parts) >= 3:
+            try:
+                days = int(parts[1])
+                start_date = datetime.now()
+                end_date = start_date + timedelta(days=days)
+                db.create_or_update_subscription(
+                    user_id,
+                    "pro",
+                    start_date.isoformat(),
+                    end_date.isoformat(),
+                    auto_renew=False,
+                    payment_id=f"sub_{user_id}_{int(datetime.now().timestamp())}"
+                )
+                # Начисляем первый бонус
+                db.add_credits(user_id, PRO_DAILY_BONUS)
+                db.update_last_daily_bonus(user_id, start_date.isoformat())
+                await message.answer(
+                    f"🌟 *PRO подписка активирована!*\n\n"
+                    f"Длительность: {days} дней\n"
+                    f"Действует до: {end_date.strftime('%d.%m.%Y')}\n"
+                    f"Ежедневное начисление: {PRO_DAILY_BONUS} AI Coin.\n"
+                    f"Первый бонус уже начислен!",
+                    parse_mode="Markdown",
+                    reply_markup=main_menu_keyboard()
+                )
+                return
+            except Exception as e:
+                logger.error(f"Ошибка активации подписки: {e}")
+        await message.answer("⚠️ Ошибка при активации подписки. Обратитесь к администратору.")
     else:
-        await message.answer(
-            "⚠️ Произошла ошибка при начислении монет. Обратитесь к администратору.",
-            reply_markup=main_menu_keyboard()
-        )
+        await message.answer("⚠️ Неизвестный тип платежа.")
 
 # === Кнопка "Задания" ===
 @router.callback_query(F.data == "tasks")
@@ -616,88 +682,6 @@ async def handle_invalid_input(message: Message, state: FSMContext):
         "Или нажмите кнопку «Назад».",
         reply_markup=back_keyboard()
     )
-
-# ============================================================
-# === WEBHOOK ОБРАБОТЧИК ДЛЯ ЮKASSA ===
-# ============================================================
-
-async def yookassa_webhook(request):
-    """
-    Обработка webhook от ЮKassa.
-    Ожидается POST с JSON.
-    """
-    try:
-        data = await request.json()
-    except Exception as e:
-        logger.error(f"Ошибка парсинга webhook: {e}")
-        return {"status": "error", "message": "Invalid JSON"}
-
-    event = data.get("event")
-    payment_data = data.get("object", {})
-    payment_id = payment_data.get("id")
-    status = payment_data.get("status")
-    metadata = payment_data.get("metadata", {})
-    user_id = int(metadata.get("user_id", 0))
-    payment_type = metadata.get("type", "one_time")
-    duration_days = int(metadata.get("duration_days", 30))
-
-    if not user_id or not payment_id:
-        logger.warning("Webhook: отсутствуют user_id или payment_id")
-        return {"status": "error", "message": "Missing data"}
-
-    db.update_payment_status(payment_id, status)
-
-    if status == "succeeded" and payment_type == "subscription":
-        start_date = datetime.now()
-        end_date = start_date + timedelta(days=duration_days)
-        db.create_or_update_subscription(
-            user_id,
-            "pro",
-            start_date.isoformat(),
-            end_date.isoformat(),
-            auto_renew=True,
-            payment_id=payment_id
-        )
-        # Начисляем первый бонус
-        db.add_credits(user_id, PRO_DAILY_BONUS)
-        db.update_last_daily_bonus(user_id, start_date.isoformat())
-        await notify_user_about_subscription(user_id, "activated")
-        logger.info(f"Активирована PRO подписка для пользователя {user_id} на {duration_days} дней (платёж {payment_id})")
-        return {"status": "ok"}
-
-    return {"status": "ok"}
-
-async def notify_user_about_subscription(user_id: int, action: str):
-    try:
-        bot = Bot(token=BOT_TOKEN)
-        if action == "activated":
-            sub = db.get_subscription(user_id)
-            end_date = sub["end_date"] if sub else "неизвестно"
-            await bot.send_message(
-                user_id,
-                f"🌟 *PRO подписка активирована!*\n\n"
-                f"Теперь вы получаете {PRO_DAILY_BONUS} AI Coin каждый день.\n"
-                f"Действует до: {end_date[:10] if end_date else 'неизвестно'}.\n"
-                f"Ваш баланс: {db.get_credits(user_id)} AI Coin.",
-                parse_mode="Markdown"
-            )
-        elif action == "expired":
-            await bot.send_message(
-                user_id,
-                "⏰ *Ваша PRO подписка истекла.*\n"
-                "Чтобы продлить, нажмите «Купить PRO подписку» в разделе «Пополнение».",
-                parse_mode="Markdown"
-            )
-        elif action == "renewed":
-            await bot.send_message(
-                user_id,
-                f"🔄 *PRO подписка продлена!*\n"
-                f"Следующее списание через {PRO_SUBSCRIPTION_DURATION} дней.",
-                parse_mode="Markdown"
-            )
-        await bot.session.close()
-    except Exception as e:
-        logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
 
 # ============================================================
 # === АДМИН-КОМАНДЫ ===

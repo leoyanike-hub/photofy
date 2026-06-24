@@ -11,6 +11,7 @@ async def generate_image(prompt: str, model: str = "google/gemini-2.5-flash-imag
     """
     Генерирует изображение через Polza AI.
     Если передано image_data, используется как исходное изображение (img2img).
+    Поддерживает модели: google/gemini-2.5-flash-image, google/gemini-3.1-flash-image-preview
     """
     url = "https://polza.ai/api/v1/media"
     headers = {
@@ -26,12 +27,15 @@ async def generate_image(prompt: str, model: str = "google/gemini-2.5-flash-imag
         }
     }
 
-    # Если есть фото, добавляем его в base64
+    # Если есть фото, добавляем его в массив images (требование Polza AI для Gemini)
     if image_data:
         base64_image = base64.b64encode(image_data).decode('utf-8')
-        payload["input"]["image"] = f"data:image/png;base64,{base64_image}"
-        # Можно также указать, что это изображение для редактирования (зависит от модели)
-        # Для некоторых моделей нужен параметр "image_url" или "image_data"
+        payload["input"]["images"] = [
+            {
+                "type": "base64",
+                "data": base64_image
+            }
+        ]
 
     proxies = {"http": None, "https": None}  # отключаем прокси
 
@@ -41,7 +45,7 @@ async def generate_image(prompt: str, model: str = "google/gemini-2.5-flash-imag
         data = response.json()
         logger.info(f"Ответ от Polza AI: {data}")
 
-        # Извлечение URL изображения из ответа (как и раньше)
+        # Извлечение URL изображения из ответа (поддерживаем разные форматы)
         image_url = None
         if "output" in data and isinstance(data["output"], list) and len(data["output"]) > 0:
             if isinstance(data["output"][0], dict) and "url" in data["output"][0]:
@@ -60,6 +64,12 @@ async def generate_image(prompt: str, model: str = "google/gemini-2.5-flash-imag
             logger.error(f"Не удалось найти изображение в ответе: {data}")
             return None
 
-    except Exception as e:
+    except requests.exceptions.Timeout:
+        logger.error("Таймаут при запросе к Polza AI")
+        return None
+    except requests.exceptions.RequestException as e:
         logger.error(f"Ошибка запроса к Polza AI: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка: {e}")
         return None

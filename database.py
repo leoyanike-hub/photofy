@@ -237,6 +237,23 @@ def get_all_active_subscriptions() -> list:
     conn.close()
     return [dict(row) for row in rows]
 
+def spend_credits(user_id: int, amount: int) -> bool:
+    """
+    Списывает указанное количество кредитов.
+    Возвращает True, если списание успешно, иначе False.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT credits FROM users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    if not result or result[0] < amount:
+        conn.close()
+        return False
+    cursor.execute("UPDATE users SET credits = credits - ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+    conn.close()
+    return True
+    
 # ---- Платежи ----
 def save_payment(payment_id: str, user_id: int, amount: int, status: str, description: str):
     conn = sqlite3.connect(DB_NAME)

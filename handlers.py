@@ -30,7 +30,7 @@ from config import (
     PAYMENT_TOKEN, TARIFFS,
     SUBSCRIPTION_TARIFFS,
     PRO_DAILY_BONUS,
-    PRO_SUBSCRIPTION_DURATION,
+    PRO_SUBSCRIPTION_DURATION,  # <-- добавлено
     BOT_TOKEN
 )
 from yookassa_integration import create_payment
@@ -303,23 +303,19 @@ async def cb_confirm_generate(callback: CallbackQuery, state: FSMContext):
     photo_file_id = data["photo_file_id"]
     prompt = data["prompt"]
 
-    credits = db.get_credits(user_id)
-    if credits < cost:
+    # Атомарное списание монет
+    if not db.spend_credits(user_id, cost):
         await callback.answer(f"Недостаточно средств! Нужно {cost} AI Coin.", show_alert=True)
         return
-
-    # Списываем монеты
-    for _ in range(cost):
-        db.spend_credit(user_id)
 
     await callback.message.edit_text("⏳ *Генерация началась...*", parse_mode="Markdown")
     await callback.answer()
 
-    # Скачиваем фото пользователя и преобразуем в bytes
+    # Скачиваем фото
     try:
         file = await callback.bot.get_file(photo_file_id)
         file_bytes_io = await callback.bot.download_file(file.file_path)
-        image_bytes = file_bytes_io.read()   # <-- преобразуем BytesIO в bytes
+        image_bytes = file_bytes_io.read()
     except Exception as e:
         logger.error(f"Ошибка скачивания фото: {e}")
         db.add_credits(user_id, cost)
@@ -332,7 +328,6 @@ async def cb_confirm_generate(callback: CallbackQuery, state: FSMContext):
         return
 
     try:
-        # Передаём image_bytes (тип bytes) в generate_image
         result_bytes = await generate_image(prompt, model, image_data=image_bytes)
         if result_bytes:
             photo = BufferedInputFile(result_bytes, filename="result.png")

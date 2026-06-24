@@ -30,6 +30,7 @@ from config import (
     PAYMENT_TOKEN, TARIFFS,
     SUBSCRIPTION_TARIFFS,
     PRO_DAILY_BONUS,
+    PRO_SUBSCRIPTION_DURATION,
     BOT_TOKEN
 )
 from yookassa_integration import create_payment

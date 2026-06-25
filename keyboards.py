@@ -65,10 +65,4 @@ def subscription_tariffs_keyboard() -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_buy"))
     return builder.as_markup()
 
-def tasks_menu_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура меню заданий"""
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="📝 Задание 1: Скриншоты", callback_data="task_screenshots"))
-    builder.row(InlineKeyboardButton(text="👥 Задание 2: Приглашения", callback_data="task_referral"))
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu"))
-    return builder.as_markup()
+# tasks_menu_keyboard УДАЛЕНА – больше не нужна

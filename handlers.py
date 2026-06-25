@@ -1,6 +1,8 @@
 import logging
 import os
 import json
+import time
+import random
 from datetime import datetime, timedelta
 from aiogram import Router, F, types, Bot
 from aiogram.filters import Command, CommandStart
@@ -64,7 +66,6 @@ async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or "без username"
 
-    # Проверка оферты
     if not db.has_agreed(user_id):
         await message.answer(
             "📋 *Добро пожаловать в AvatarGen AI!*\n\n"
@@ -80,7 +81,6 @@ async def cmd_start(message: Message, state: FSMContext):
         )
         return
 
-    # Регистрация пользователя
     user = db.get_user(user_id)
     if not user:
         db.create_user(user_id, username)
@@ -95,7 +95,6 @@ async def cmd_start(message: Message, state: FSMContext):
             parse_mode="Markdown"
         )
 
-    # Проверяем подписку на канал
     is_member = await check_subscription(message.bot, user_id)
     if is_member:
         await show_main_menu(message, state)
@@ -431,7 +430,11 @@ async def cb_select_pro_tariff(callback: CallbackQuery):
     price = tariff["price"]
     title = f"PRO подписка на {days} дней"
     description = f"Ежедневное начисление {PRO_DAILY_BONUS} AI Coin в течение {days} дней."
-    payload = f"sub_{days}d_{price}"
+
+    # Уникальный идентификатор
+    unique_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
+    payload = f"sub_{days}d_{price}_{unique_id}"
+    start_parameter = f"sub_{tariff_key}_{unique_id}"
 
     provider_data = {
         "receipt": {
@@ -460,7 +463,7 @@ async def cb_select_pro_tariff(callback: CallbackQuery):
             provider_token=PAYMENT_TOKEN,
             currency="RUB",
             prices=[LabeledPrice(label=title, amount=price)],
-            start_parameter=f"sub_{tariff_key}",
+            start_parameter=start_parameter,
             need_name=False,
             need_phone_number=False,
             need_email=False,
@@ -471,33 +474,19 @@ async def cb_select_pro_tariff(callback: CallbackQuery):
         await callback.answer("💳 Открываю платёжное окно...")
     except Exception as e:
         logger.error(f"Ошибка отправки инвойса для подписки: {e}")
-        await callback.message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
+        await callback.message.answer(f"❌ Ошибка при создании платежа: {e}")
         await callback.answer()
 
-# === Разовые платежи ===
+# === Разовые платежи (с уникальным payload) ===
 async def send_invoice(callback: CallbackQuery, tariff_key: str):
     coins, price, label = TARIFFS[tariff_key]
     title = label
     description = f"Пополнение баланса на {coins} AI Coin."
-    payload = f"pay_{tariff_key}_{coins}"
 
-    provider_data = {
-        "receipt": {
-            "items": [
-                {
-                    "description": title,
-                    "quantity": "1.00",
-                    "amount": {
-                        "value": f"{price/100:.2f}",
-                        "currency": "RUB"
-                    },
-                    "vat_code": 1,
-                    "payment_mode": "full_payment",
-                    "payment_subject": "service"
-                }
-            ]
-        }
-    }
+    # Уникальный идентификатор
+    unique_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
+    payload = f"pay_{tariff_key}_{coins}_{unique_id}"
+    start_parameter = f"pay_{tariff_key}_{unique_id}"
 
     try:
         await callback.bot.send_invoice(
@@ -508,18 +497,17 @@ async def send_invoice(callback: CallbackQuery, tariff_key: str):
             provider_token=PAYMENT_TOKEN,
             currency="RUB",
             prices=[LabeledPrice(label=title, amount=price)],
-            start_parameter=f"pay_{tariff_key}",
+            start_parameter=start_parameter,
             need_name=False,
             need_phone_number=False,
             need_email=False,
             need_shipping_address=False,
-            is_flexible=False,
-            provider_data=json.dumps(provider_data)
+            is_flexible=False
         )
         await callback.answer("💳 Открываю платёжное окно...")
     except Exception as e:
         logger.error(f"Ошибка отправки инвойса: {e}")
-        await callback.message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
+        await callback.message.answer(f"❌ Ошибка при создании платежа. Пожалуйста, попробуйте позже.\n\n{e}")
         await callback.answer()
 
 @router.callback_query(F.data == "buy_50")
@@ -542,10 +530,12 @@ async def cb_buy_480(callback: CallbackQuery):
 async def cb_buy_960(callback: CallbackQuery):
     await send_invoice(callback, "buy_960")
 
+# === Pre-checkout ===
 @router.pre_checkout_query()
 async def pre_checkout_query_handler(query: PreCheckoutQuery):
     await query.answer(ok=True)
 
+# === Обработка успешного платежа (с учётом уникального payload) ===
 @router.message(F.successful_payment)
 async def successful_payment_handler(message: Message):
     payment = message.successful_payment
@@ -553,8 +543,9 @@ async def successful_payment_handler(message: Message):
     user_id = message.from_user.id
 
     if payload.startswith("pay_"):
+        # Формат: pay_tariff_key_coins_unique
         parts = payload.split("_")
-        if len(parts) >= 3:
+        if len(parts) >= 4:
             try:
                 coins = int(parts[2])
                 db.add_credits(user_id, coins)
@@ -571,10 +562,12 @@ async def successful_payment_handler(message: Message):
                 pass
         await message.answer("⚠️ Ошибка при начислении монет. Обратитесь к администратору.")
     elif payload.startswith("sub_"):
+        # Формат: sub_daysd_price_unique
         parts = payload.split("_")
-        if len(parts) >= 3:
+        if len(parts) >= 4:
             try:
-                days = int(parts[1])
+                days_str = parts[1].replace("d", "")
+                days = int(days_str)
                 start_date = datetime.now()
                 end_date = start_date + timedelta(days=days)
                 db.create_or_update_subscription(

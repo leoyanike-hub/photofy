@@ -611,17 +611,38 @@ async def cb_tasks(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    guide_text = (
-        "📋 *Задание: получи 5 AI Coin бесплатно!*\n\n"
-        "1. Введите в поиске TikTok «фото нейросетью».\n"
-        "2. Зайдите на **три любых видео** с тематикой обработки фотографий.\n"
-        "3. Под каждым из них оставьте комментарий:\n"
-        "   `сделал/сделала такое фото в этом боте @Trendavatar_bot`\n"
-        "4. Отправьте сюда **ссылки на ваши комментарии** (по одной).\n\n"
-        "После третьей ссылки вы получите бонус 5 AI Coin."
-    )
-    await callback.message.edit_text(guide_text, parse_mode="Markdown", reply_markup=back_keyboard())
+    # Отправляем фото-инструкцию (если есть)
+    import os
+    image_path = os.path.join(os.path.dirname(__file__), "task_instruction.jpg")
+    try:
+        with open(image_path, "rb") as photo:
+            await callback.message.answer_photo(
+                photo,
+                caption=(
+                    "📋 *Инструкция по выполнению задания*\n\n"
+                    "1️⃣ Введите в поиске TikTok «фото нейросетью».\n"
+                    "2️⃣ Зайдите на **три любых видео** с тематикой обработки фотографий.\n"
+                    "3️⃣ Под каждым из них оставьте комментарий:\n"
+                    "   `сделал/сделала такое фото в этом боте @Trendavatar_bot`\n"
+                    "4️⃣ Отправьте сюда **ссылки на ваши комментарии** (по одной).\n\n"
+                    "После третьей ссылки вы получите бонус 5 AI Coin."
+                ),
+                parse_mode="Markdown"
+            )
+    except FileNotFoundError:
+        # Если файл отсутствует – отправляем только текст
+        await callback.message.answer(
+            "📋 *Инструкция по выполнению задания*\n\n"
+            "1️⃣ Введите в поиске TikTok «фото нейросетью».\n"
+            "2️⃣ Зайдите на **три любых видео** с тематикой обработки фотографий.\n"
+            "3️⃣ Под каждым из них оставьте комментарий:\n"
+            "   `сделал/сделала такое фото в этом боте @Trendavatar_bot`\n"
+            "4️⃣ Отправьте сюда **ссылки на ваши комментарии** (по одной).\n\n"
+            "После третьей ссылки вы получите бонус 5 AI Coin.",
+            parse_mode="Markdown"
+        )
 
+    # Затем отправляем запрос на ввод ссылок
     await callback.message.answer(
         "📎 *Отправьте 3 ссылки на комментарии поочередно.*\n"
         "Начните с первой.",
@@ -629,7 +650,6 @@ async def cb_tasks(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(TaskStates.waiting_for_first_link)
     await callback.answer()
-
 @router.message(TaskStates.waiting_for_first_link, F.text)
 async def handle_task_link_1(message: Message, state: FSMContext):
     link = message.text.strip()

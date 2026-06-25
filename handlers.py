@@ -1,4 +1,5 @@
 import logging
+import os
 import json
 from datetime import datetime, timedelta
 from aiogram import Router, F, types, Bot
@@ -19,7 +20,8 @@ from keyboards import (
     tariffs_keyboard,
     choose_model_keyboard,
     agreement_keyboard,
-    subscription_tariffs_keyboard
+    subscription_tariffs_keyboard,
+    tasks_menu_keyboard
 )
 from config import (
     FREE_CREDITS, SUBSCRIBE_BONUS,
@@ -43,10 +45,10 @@ class ModelSelection(StatesGroup):
 class GenerateStates(StatesGroup):
     waiting_for_photo_and_prompt = State()
 
-class TaskStates(StatesGroup):
-    waiting_for_first_link = State()
-    waiting_for_second_link = State()
-    waiting_for_third_link = State()
+class ScreenshotTaskStates(StatesGroup):
+    waiting_for_screenshot_1 = State()
+    waiting_for_screenshot_2 = State()
+    waiting_for_screenshot_3 = State()
 
 # === Вспомогательная функция проверки подписки ===
 async def check_subscription(bot, user_id: int) -> bool:
@@ -57,12 +59,20 @@ async def check_subscription(bot, user_id: int) -> bool:
         logger.warning(f"Ошибка проверки подписки для {user_id}: {e}")
         return False
 
-# === /start с проверкой оферты ===
+# === /start с проверкой оферты и реферальной ссылки ===
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or "без username"
+    args = message.text.split()
+    ref_id = None
+    if len(args) > 1 and args[1].startswith("ref_"):
+        try:
+            ref_id = int(args[1].replace("ref_", ""))
+        except ValueError:
+            pass
 
+    # Проверяем оферту
     if not db.has_agreed(user_id):
         await message.answer(
             "📋 *Добро пожаловать в AvatarGen AI!*\n\n"
@@ -78,10 +88,52 @@ async def cmd_start(message: Message, state: FSMContext):
         )
         return
 
-    user = db.get_user(user_id)
-    if not user:
-        db.create_user(user_id, username)
+    # Обработка реферальной ссылки
+    if ref_id and ref_id != user_id:
+        # Проверяем, не зарегистрирован ли уже пользователь
+        user = db.get_user(user_id)
+        if not user:
+            # Создаём пользователя и записываем реферала
+            db.create_user(user_id, username)
+            # Добавляем реферальную связь
+            if db.add_referral(ref_id, user_id):
+                # Начисляем бонус пригласившему
+                db.add_credits(ref_id, BONUS_TASK)
+                await message.answer(
+                    f"🎉 *Вы перешли по реферальной ссылке!*\n"
+                    f"Ваш друг получил бонус {BONUS_TASK} AI Coin.\n"
+                    f"Вам тоже начислено {FREE_CREDITS} AI Coin за регистрацию.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await message.answer(
+                    f"👋 *Добро пожаловать!*\n"
+                    f"Вы получили {FREE_CREDITS} AI Coin.",
+                    parse_mode="Markdown"
+                )
+        else:
+            # Пользователь уже существует
+            await message.answer(
+                "👋 *Вы уже зарегистрированы!*",
+                parse_mode="Markdown"
+            )
+    else:
+        # Обычная регистрация
+        user = db.get_user(user_id)
+        if not user:
+            db.create_user(user_id, username)
+            await message.answer(
+                f"👋 *Добро пожаловать!*\n"
+                f"Вы получили {FREE_CREDITS} AI Coin.",
+                parse_mode="Markdown"
+            )
+        else:
+            await message.answer(
+                "👋 *С возвращением!*",
+                parse_mode="Markdown"
+            )
 
+    # Проверяем подписку на канал
     is_member = await check_subscription(message.bot, user_id)
     if is_member:
         await show_main_menu(message, state)
@@ -287,7 +339,7 @@ async def handle_photo_and_prompt(message: Message, state: FSMContext):
             reply_markup=generate_confirm_keyboard()
         )
 
-# ========== ПОДТВЕРЖДЕНИЕ ГЕНЕРАЦИИ ==========
+# === Подтверждение генерации ===
 @router.callback_query(F.data == "confirm_generate")
 async def cb_confirm_generate(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -301,7 +353,6 @@ async def cb_confirm_generate(callback: CallbackQuery, state: FSMContext):
     photo_file_id = data["photo_file_id"]
     prompt = data["prompt"]
 
-    # Атомарное списание монет
     if not db.spend_credits(user_id, cost):
         await callback.answer(f"Недостаточно средств! Нужно {cost} AI Coin.", show_alert=True)
         return
@@ -309,7 +360,6 @@ async def cb_confirm_generate(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("⏳ *Генерация началась...*", parse_mode="Markdown")
     await callback.answer()
 
-    # Скачиваем фото
     try:
         file = await callback.bot.get_file(photo_file_id)
         file_bytes_io = await callback.bot.download_file(file.file_path)
@@ -387,7 +437,7 @@ async def cb_buy_tokens(callback: CallbackQuery):
 async def cb_back_to_buy(callback: CallbackQuery):
     await cb_buy(callback)
 
-# === PRO подписка (выбор тарифа) ===
+# === PRO подписка ===
 @router.callback_query(F.data == "buy_pro_subscription")
 async def cb_buy_pro(callback: CallbackQuery):
     text = (
@@ -401,10 +451,9 @@ async def cb_buy_pro(callback: CallbackQuery):
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=subscription_tariffs_keyboard())
     await callback.answer()
 
-# === Обработчик выбора тарифа подписки ===
 @router.callback_query(F.data.startswith("select_pro_"))
 async def cb_select_pro_tariff(callback: CallbackQuery):
-    tariff_key = callback.data.split("_")[2]  # например "7d"
+    tariff_key = callback.data.split("_")[2]
     tariff = SUBSCRIPTION_TARIFFS.get(tariff_key)
     if not tariff:
         await callback.answer("Неверный тариф", show_alert=True)
@@ -416,7 +465,6 @@ async def cb_select_pro_tariff(callback: CallbackQuery):
         await callback.answer("У вас уже есть активная PRO подписка!", show_alert=True)
         return
 
-    # Отправляем счёт через send_invoice
     days = tariff["days"]
     price = tariff["price"]
     title = f"PRO подписка на {days} дней"
@@ -464,7 +512,7 @@ async def cb_select_pro_tariff(callback: CallbackQuery):
         await callback.message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
         await callback.answer()
 
-# === Разовые платежи через Telegram Payments (sendInvoice) ===
+# === Разовые платежи ===
 async def send_invoice(callback: CallbackQuery, tariff_key: str):
     coins, price, label = TARIFFS[tariff_key]
     title = label
@@ -532,12 +580,10 @@ async def cb_buy_480(callback: CallbackQuery):
 async def cb_buy_960(callback: CallbackQuery):
     await send_invoice(callback, "buy_960")
 
-# === Обработка предварительной проверки платежа ===
 @router.pre_checkout_query()
 async def pre_checkout_query_handler(query: PreCheckoutQuery):
     await query.answer(ok=True)
 
-# === Обработка успешного платежа ===
 @router.message(F.successful_payment)
 async def successful_payment_handler(message: Message):
     payment = message.successful_payment
@@ -545,7 +591,6 @@ async def successful_payment_handler(message: Message):
     user_id = message.from_user.id
 
     if payload.startswith("pay_"):
-        # Разовая покупка токенов
         parts = payload.split("_")
         if len(parts) >= 3:
             try:
@@ -564,7 +609,6 @@ async def successful_payment_handler(message: Message):
                 pass
         await message.answer("⚠️ Ошибка при начислении монет. Обратитесь к администратору.")
     elif payload.startswith("sub_"):
-        # Подписка
         parts = payload.split("_")
         if len(parts) >= 3:
             try:
@@ -579,7 +623,6 @@ async def successful_payment_handler(message: Message):
                     auto_renew=False,
                     payment_id=f"sub_{user_id}_{int(datetime.now().timestamp())}"
                 )
-                # Начисляем первый бонус
                 db.add_credits(user_id, PRO_DAILY_BONUS)
                 db.update_last_daily_bonus(user_id, start_date.isoformat())
                 await message.answer(
@@ -598,11 +641,32 @@ async def successful_payment_handler(message: Message):
     else:
         await message.answer("⚠️ Неизвестный тип платежа.")
 
-# === Кнопка "Задания" ===
+# ============================================================
+# === НОВЫЕ ЗАДАНИЯ ===
+# ============================================================
+
+# --- Меню заданий ---
 @router.callback_query(F.data == "tasks")
 async def cb_tasks(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "📋 *Задания*\n\n"
+        "Выберите задание, которое хотите выполнить:\n\n"
+        "📝 *Задание 1: Скриншоты комментариев*\n"
+        "   Сделайте скриншоты 3 ваших комментариев в TikTok под видео с нейросетями.\n"
+        "   Награда: 5 AI Coin\n\n"
+        "👥 *Задание 2: Приглашения*\n"
+        "   Приглашайте друзей и получайте бонусы.\n"
+        "   Награда: 5 AI Coin за каждого приглашённого.",
+        parse_mode="Markdown",
+        reply_markup=tasks_menu_keyboard()
+    )
+    await callback.answer()
+
+# --- Задание 1: Скриншоты ---
+@router.callback_query(F.data == "task_screenshots")
+async def cb_task_screenshots(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    if db.task_completed(user_id, "tiktok_task"):
+    if db.task_completed(user_id, "screenshots_task"):
         await callback.message.edit_text(
             "📋 *Вы уже выполнили это задание.*\nОно доступно только один раз.",
             parse_mode="Markdown",
@@ -611,79 +675,47 @@ async def cb_tasks(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # Отправляем фото-инструкцию (если есть)
-    import os
-    image_path = os.path.join(os.path.dirname(__file__), "task_instruction.jpg")
-    try:
-        with open(image_path, "rb") as photo:
-            await callback.message.answer_photo(
-                photo,
-                caption=(
-                    "📋 *Инструкция по выполнению задания*\n\n"
-                    "1️⃣ Введите в поиске TikTok «фото нейросетью».\n"
-                    "2️⃣ Зайдите на **три любых видео** с тематикой обработки фотографий.\n"
-                    "3️⃣ Под каждым из них оставьте комментарий:\n"
-                    "   `сделал/сделала такое фото в этом боте @Trendavatar_bot`\n"
-                    "4️⃣ Отправьте сюда **ссылки на ваши комментарии** (по одной).\n\n"
-                    "После третьей ссылки вы получите бонус 5 AI Coin."
-                ),
-                parse_mode="Markdown"
-            )
-    except FileNotFoundError:
-        # Если файл отсутствует – отправляем только текст
-        await callback.message.answer(
-            "📋 *Инструкция по выполнению задания*\n\n"
-            "1️⃣ Введите в поиске TikTok «фото нейросетью».\n"
-            "2️⃣ Зайдите на **три любых видео** с тематикой обработки фотографий.\n"
-            "3️⃣ Под каждым из них оставьте комментарий:\n"
-            "   `сделал/сделала такое фото в этом боте @Trendavatar_bot`\n"
-            "4️⃣ Отправьте сюда **ссылки на ваши комментарии** (по одной).\n\n"
-            "После третьей ссылки вы получите бонус 5 AI Coin.",
-            parse_mode="Markdown"
-        )
-
-    # Затем отправляем запрос на ввод ссылок
+    await callback.message.edit_text(
+        "📝 *Задание: отправьте 3 скриншота комментариев*\n\n"
+        "1. Введите в поиске TikTok «фото нейросетью».\n"
+        "2. Зайдите на **три любых видео** с тематикой обработки фотографий.\n"
+        "3. Под каждым из них оставьте комментарий:\n"
+        "   `сделал/сделала такое фото в этом боте @Trendavatar_bot`\n"
+        "4. Сделайте **скриншот** каждого комментария и отправьте их по очереди.\n\n"
+        "После третьего скриншота вы получите бонус 5 AI Coin.",
+        parse_mode="Markdown",
+        reply_markup=back_keyboard()
+    )
     await callback.message.answer(
-        "📎 *Отправьте 3 ссылки на комментарии поочередно.*\n"
-        "Начните с первой.",
+        "📎 *Отправьте первый скриншот.*",
         parse_mode="Markdown"
     )
-    await state.set_state(TaskStates.waiting_for_first_link)
+    await state.set_state(ScreenshotTaskStates.waiting_for_screenshot_1)
     await callback.answer()
-@router.message(TaskStates.waiting_for_first_link, F.text)
-async def handle_task_link_1(message: Message, state: FSMContext):
-    link = message.text.strip()
-    if not link.startswith("http"):
-        await message.answer("❌ Это не похоже на ссылку. Пожалуйста, отправьте корректную ссылку на комментарий.")
-        return
-    user_id = message.from_user.id
-    db.save_task_link(user_id, link, 1)
-    await message.answer("✅ Ссылка 1/3 получена. Отправьте вторую.")
-    await state.set_state(TaskStates.waiting_for_second_link)
 
-@router.message(TaskStates.waiting_for_second_link, F.text)
-async def handle_task_link_2(message: Message, state: FSMContext):
-    link = message.text.strip()
-    if not link.startswith("http"):
-        await message.answer("❌ Это не ссылка. Попробуйте ещё раз.")
-        return
-    user_id = message.from_user.id
-    db.save_task_link(user_id, link, 2)
-    await message.answer("✅ Ссылка 2/3 получена. Отправьте третью.")
-    await state.set_state(TaskStates.waiting_for_third_link)
+@router.message(ScreenshotTaskStates.waiting_for_screenshot_1, F.photo)
+async def handle_screenshot_1(message: Message, state: FSMContext):
+    await state.update_data(screenshot_1=message.photo[-1].file_id)
+    await message.answer("✅ Скриншот 1/3 получен. Отправьте второй.")
+    await state.set_state(ScreenshotTaskStates.waiting_for_screenshot_2)
 
-@router.message(TaskStates.waiting_for_third_link, F.text)
-async def handle_task_link_3(message: Message, state: FSMContext):
-    link = message.text.strip()
-    if not link.startswith("http"):
-        await message.answer("❌ Это не ссылка. Попробуйте ещё раз.")
-        return
-    user_id = message.from_user.id
-    db.save_task_link(user_id, link, 3)
+@router.message(ScreenshotTaskStates.waiting_for_screenshot_2, F.photo)
+async def handle_screenshot_2(message: Message, state: FSMContext):
+    await state.update_data(screenshot_2=message.photo[-1].file_id)
+    await message.answer("✅ Скриншот 2/3 получен. Отправьте третий.")
+    await state.set_state(ScreenshotTaskStates.waiting_for_screenshot_3)
 
+@router.message(ScreenshotTaskStates.waiting_for_screenshot_3, F.photo)
+async def handle_screenshot_3(message: Message, state: FSMContext):
+    await state.update_data(screenshot_3=message.photo[-1].file_id)
+    user_id = message.from_user.id
+
+    # Все три скриншота получены – начисляем бонус
     db.add_credits(user_id, BONUS_TASK)
-    db.mark_task_done(user_id, "tiktok_task")
-    db.clear_task_links(user_id)
+    db.mark_task_done(user_id, "screenshots_task")
+
+    # Очищаем данные состояния
+    await state.clear()
 
     await message.answer(
         f"🎉 *Поздравляем!*\n\n"
@@ -692,14 +724,49 @@ async def handle_task_link_3(message: Message, state: FSMContext):
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard()
     )
-    await state.clear()
 
-# === Обработка некорректного ввода ===
+# --- Задание 2: Рефералы ---
+@router.callback_query(F.data == "task_referral")
+async def cb_task_referral(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    bot_username = (await callback.bot.get_me()).username
+    referral_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+    referral_count = db.get_referral_count(user_id)
+
+    await callback.message.edit_text(
+        "👥 *Задание: приглашайте друзей!*\n\n"
+        "Получите 5 AI Coin за каждого друга, который перейдёт по вашей ссылке и зарегистрируется.\n\n"
+        f"📊 *Вы пригласили:* {referral_count} человек\n\n"
+        "Ваша реферальная ссылка:\n"
+        f"`{referral_link}`\n\n"
+        "Поделитесь ссылкой с друзьями, опубликуйте её в соцсетях, делайте видео с нашим ботом и прикрепляйте ссылку.\n\n"
+        "Бонус начисляется после регистрации нового пользователя.",
+        parse_mode="Markdown",
+        reply_markup=back_keyboard()
+    )
+    await callback.answer()
+
+# ============================================================
+# === ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ===
+# ============================================================
+
+# === Обработка некорректного ввода в состоянии генерации ===
 @router.message(GenerateStates.waiting_for_photo_and_prompt)
 async def handle_invalid_input(message: Message, state: FSMContext):
     await message.answer(
         "❌ Пожалуйста, отправьте **фото** с **текстовым промптом** в подписи.\n"
         "Или нажмите кнопку «Назад».",
+        reply_markup=back_keyboard()
+    )
+
+# === Обработка некорректного ввода для скриншотов ===
+@router.message(ScreenshotTaskStates.waiting_for_screenshot_1, ~F.photo)
+@router.message(ScreenshotTaskStates.waiting_for_screenshot_2, ~F.photo)
+@router.message(ScreenshotTaskStates.waiting_for_screenshot_3, ~F.photo)
+async def handle_invalid_screenshot(message: Message, state: FSMContext):
+    await message.answer(
+        "❌ Пожалуйста, отправьте **фото** (скриншот).\n"
+        "Текст не принимается.",
         reply_markup=back_keyboard()
     )
 

@@ -5,7 +5,13 @@ from config import SUBSCRIPTION_TARIFFS
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="✨ Сгенерировать", callback_data="generate"))
-    builder.row(InlineKeyboardButton(text="💰 Пополнить", callback_data="buy"), InlineKeyboardButton(text="📋 Задания", callback_data="tasks"))
+    builder.row(
+        InlineKeyboardButton(text="💰 Пополнить", callback_data="buy"),
+        InlineKeyboardButton(text="📋 Задания", callback_data="tasks")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🌟 Моя подписка", callback_data="my_subscription")
+    )
     return builder.as_markup()
 
 def subscription_keyboard() -> InlineKeyboardMarkup:
@@ -64,5 +70,3 @@ def subscription_tariffs_keyboard() -> InlineKeyboardMarkup:
         builder.row(InlineKeyboardButton(text=label, callback_data=f"select_pro_{key}"))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_buy"))
     return builder.as_markup()
-
-# tasks_menu_keyboard УДАЛЕНА – больше не нужна

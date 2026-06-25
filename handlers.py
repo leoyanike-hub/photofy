@@ -20,8 +20,7 @@ from keyboards import (
     tariffs_keyboard,
     choose_model_keyboard,
     agreement_keyboard,
-    subscription_tariffs_keyboard,
-    tasks_menu_keyboard
+    subscription_tariffs_keyboard
 )
 from config import (
     FREE_CREDITS, SUBSCRIBE_BONUS,
@@ -59,20 +58,13 @@ async def check_subscription(bot, user_id: int) -> bool:
         logger.warning(f"Ошибка проверки подписки для {user_id}: {e}")
         return False
 
-# === /start с проверкой оферты и реферальной ссылки ===
+# === /start без рефералов ===
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or "без username"
-    args = message.text.split()
-    ref_id = None
-    if len(args) > 1 and args[1].startswith("ref_"):
-        try:
-            ref_id = int(args[1].replace("ref_", ""))
-        except ValueError:
-            pass
 
-    # Проверяем оферту
+    # Проверка оферты
     if not db.has_agreed(user_id):
         await message.answer(
             "📋 *Добро пожаловать в AvatarGen AI!*\n\n"
@@ -88,64 +80,20 @@ async def cmd_start(message: Message, state: FSMContext):
         )
         return
 
-    # Обработка реферальной ссылки
-    if ref_id and ref_id != user_id:
-        # Проверяем, существует ли пользователь
-        user = db.get_user(user_id)
-        if not user:
-            # Создаём пользователя
-            db.create_user(user_id, username)
-            # Добавляем реферальную связь
-            success = db.add_referral(ref_id, user_id)
-            if success:
-                # Начисляем бонус пригласившему
-                db.add_credits(ref_id, BONUS_TASK)
-                # Уведомляем нового пользователя
-                await message.answer(
-                    f"🎉 *Вы перешли по реферальной ссылке!*\n"
-                    f"Ваш друг получил бонус {BONUS_TASK} AI Coin.\n"
-                    f"Вам тоже начислено {FREE_CREDITS} AI Coin за регистрацию.",
-                    parse_mode="Markdown"
-                )
-                # Уведомляем пригласившего (если нужно, можно отправить отдельно)
-                try:
-                    await message.bot.send_message(
-                        ref_id,
-                        f"👤 *Новый реферал!*\n"
-                        f"Пользователь @{username or user_id} перешёл по вашей ссылке.\n"
-                        f"Вам начислено {BONUS_TASK} AI Coin.",
-                        parse_mode="Markdown"
-                    )
-                except Exception as e:
-                    logger.error(f"Не удалось уведомить реферера {ref_id}: {e}")
-            else:
-                # Если связь не добавлена (возможно, пользователь уже был приглашён)
-                await message.answer(
-                    f"👋 *Добро пожаловать!*\n"
-                    f"Вы получили {FREE_CREDITS} AI Coin.",
-                    parse_mode="Markdown"
-                )
-        else:
-            # Пользователь уже существует
-            await message.answer(
-                "👋 *Вы уже зарегистрированы!*",
-                parse_mode="Markdown"
-            )
+    # Регистрация пользователя
+    user = db.get_user(user_id)
+    if not user:
+        db.create_user(user_id, username)
+        await message.answer(
+            f"👋 *Добро пожаловать!*\n"
+            f"Вы получили {FREE_CREDITS} AI Coin.",
+            parse_mode="Markdown"
+        )
     else:
-        # Обычная регистрация (без реферальной ссылки)
-        user = db.get_user(user_id)
-        if not user:
-            db.create_user(user_id, username)
-            await message.answer(
-                f"👋 *Добро пожаловать!*\n"
-                f"Вы получили {FREE_CREDITS} AI Coin.",
-                parse_mode="Markdown"
-            )
-        else:
-            await message.answer(
-                "👋 *С возвращением!*",
-                parse_mode="Markdown"
-            )
+        await message.answer(
+            "👋 *С возвращением!*",
+            parse_mode="Markdown"
+        )
 
     # Проверяем подписку на канал
     is_member = await check_subscription(message.bot, user_id)
@@ -656,29 +604,11 @@ async def successful_payment_handler(message: Message):
         await message.answer("⚠️ Неизвестный тип платежа.")
 
 # ============================================================
-# === НОВЫЕ ЗАДАНИЯ ===
+# === ЗАДАНИЕ: СКРИНШОТЫ (единственное задание) ===
 # ============================================================
 
-# --- Меню заданий ---
 @router.callback_query(F.data == "tasks")
 async def cb_tasks(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "📋 *Задания*\n\n"
-        "Выберите задание, которое хотите выполнить:\n\n"
-        "📝 *Задание 1: Скриншоты комментариев*\n"
-        "   Сделайте скриншоты 3 ваших комментариев в TikTok под видео с нейросетями.\n"
-        "   Награда: 5 AI Coin\n\n"
-        "👥 *Задание 2: Приглашения*\n"
-        "   Приглашайте друзей и получайте бонусы.\n"
-        "   Награда: 5 AI Coin за каждого приглашённого.",
-        parse_mode="Markdown",
-        reply_markup=tasks_menu_keyboard()
-    )
-    await callback.answer()
-
-# --- Задание 1: Скриншоты (исправлено: принимает любые скриншоты) ---
-@router.callback_query(F.data == "task_screenshots")
-async def cb_task_screenshots(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     if db.task_completed(user_id, "screenshots_task"):
         await callback.message.edit_text(
@@ -724,11 +654,9 @@ async def handle_screenshot_3(message: Message, state: FSMContext):
     await state.update_data(screenshot_3=message.photo[-1].file_id)
     user_id = message.from_user.id
 
-    # Все три скриншота получены – начисляем бонус
     db.add_credits(user_id, BONUS_TASK)
     db.mark_task_done(user_id, "screenshots_task")
 
-    # Очищаем данные состояния
     await state.clear()
 
     await message.answer(
@@ -739,41 +667,7 @@ async def handle_screenshot_3(message: Message, state: FSMContext):
         reply_markup=main_menu_keyboard()
     )
 
-# --- Задание 2: Рефералы (исправлено: корректный подсчёт) ---
-@router.callback_query(F.data == "task_referral")
-async def cb_task_referral(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    bot_username = (await callback.bot.get_me()).username
-    referral_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
-    referral_count = db.get_referral_count(user_id)
-
-    await callback.message.edit_text(
-        "👥 *Задание: приглашайте друзей!*\n\n"
-        "Получите 5 AI Coin за каждого друга, который перейдёт по вашей ссылке и зарегистрируется.\n\n"
-        f"📊 *Вы пригласили:* {referral_count} человек\n\n"
-        "Ваша реферальная ссылка:\n"
-        f"`{referral_link}`\n\n"
-        "Поделитесь ссылкой с друзьями, опубликуйте её в соцсетях, делайте видео с нашим ботом и прикрепляйте ссылку.\n\n"
-        "Бонус начисляется после регистрации нового пользователя.",
-        parse_mode="Markdown",
-        reply_markup=back_keyboard()
-    )
-    await callback.answer()
-
-# ============================================================
-# === ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ===
-# ============================================================
-
-# === Обработка некорректного ввода в состоянии генерации ===
-@router.message(GenerateStates.waiting_for_photo_and_prompt)
-async def handle_invalid_input(message: Message, state: FSMContext):
-    await message.answer(
-        "❌ Пожалуйста, отправьте **фото** с **текстовым промптом** в подписи.\n"
-        "Или нажмите кнопку «Назад».",
-        reply_markup=back_keyboard()
-    )
-
-# === Обработка некорректного ввода для скриншотов ===
+# === Обработка некорректного ввода ===
 @router.message(ScreenshotTaskStates.waiting_for_screenshot_1, ~F.photo)
 @router.message(ScreenshotTaskStates.waiting_for_screenshot_2, ~F.photo)
 @router.message(ScreenshotTaskStates.waiting_for_screenshot_3, ~F.photo)
@@ -781,6 +675,15 @@ async def handle_invalid_screenshot(message: Message, state: FSMContext):
     await message.answer(
         "❌ Пожалуйста, отправьте **фото** (скриншот).\n"
         "Текст не принимается.",
+        reply_markup=back_keyboard()
+    )
+
+# === Обработка некорректного ввода в состоянии генерации ===
+@router.message(GenerateStates.waiting_for_photo_and_prompt)
+async def handle_invalid_input(message: Message, state: FSMContext):
+    await message.answer(
+        "❌ Пожалуйста, отправьте **фото** с **текстовым промптом** в подписи.\n"
+        "Или нажмите кнопку «Назад».",
         reply_markup=back_keyboard()
     )
 

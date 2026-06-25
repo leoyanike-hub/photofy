@@ -3,21 +3,24 @@ import sqlite3
 from datetime import datetime
 from config import FREE_CREDITS, SUBSCRIBE_BONUS
 
-# Определяем постоянную директорию для данных
+# Определяем постоянную директорию для данных (на Bothost это /app/data)
 DATA_DIR = os.getenv('DATA_DIR', '/app/data')
-os.makedirs(DATA_DIR, exist_ok=True)  # создаём папку, если её нет
+os.makedirs(DATA_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, 'users.db')
 
 def get_db_connection():
-    """Возвращает соединение с БД и устанавливает row_factory."""
+    """Возвращает соединение с БД и устанавливает row_factory для удобной работы с результатами."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
+    """Создаёт все таблицы, если их нет."""
     conn = get_db_connection()
     cursor = conn.cursor()
+
+    # Таблица пользователей
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -27,6 +30,8 @@ def init_db():
             registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Таблица выполненных заданий (для одноразовых заданий)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS completed_tasks (
             user_id INTEGER PRIMARY KEY,
@@ -34,6 +39,8 @@ def init_db():
             completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Таблица для сохранения ссылок на задания (если нужна, но мы используем скриншоты – можно оставить для совместимости)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS task_links (
             user_id INTEGER,
@@ -42,12 +49,16 @@ def init_db():
             PRIMARY KEY (user_id, order_num)
         )
     """)
+
+    # Таблица согласий с офертой
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS agreements (
             user_id INTEGER PRIMARY KEY,
             agreed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Таблица подписок (PRO)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             user_id INTEGER PRIMARY KEY,
@@ -60,6 +71,8 @@ def init_db():
             payment_id TEXT
         )
     """)
+
+    # Таблица платежей (история)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS payments (
             id TEXT PRIMARY KEY,
@@ -72,17 +85,31 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Таблица реферальных связей
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER,
+            referred_id INTEGER UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     conn.close()
 
-# ---- Функции для пользователей ----
+# ============================================================
+# ФУНКЦИИ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ
+# ============================================================
+
 def get_user(user_id: int):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    result = cursor.fetchone()
+    row = cursor.fetchone()
     conn.close()
-    return dict(result) if result else None
+    return dict(row) if row else None
 
 def create_user(user_id: int, username: str = None):
     conn = get_db_connection()
@@ -126,6 +153,7 @@ def spend_credits(user_id: int, amount: int) -> bool:
     conn.close()
     return True
 
+# Для совместимости со старым кодом, где использовался spend_credit (одна монета)
 def spend_credit(user_id: int) -> bool:
     return spend_credits(user_id, 1)
 
@@ -144,7 +172,10 @@ def is_subscribed(user_id: int) -> bool:
     conn.close()
     return bool(result[0]) if result else False
 
-# ---- Задания ----
+# ============================================================
+# ФУНКЦИИ ДЛЯ ЗАДАНИЙ (одноразовые)
+# ============================================================
+
 def task_completed(user_id: int, task_type: str) -> bool:
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -160,6 +191,7 @@ def mark_task_done(user_id: int, task_type: str):
     conn.commit()
     conn.close()
 
+# (Функции для работы со ссылками на задания – оставлены для обратной совместимости, но в новых заданиях не используются)
 def save_task_link(user_id: int, link: str, order: int) -> None:
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -185,7 +217,10 @@ def clear_task_links(user_id: int) -> None:
     conn.commit()
     conn.close()
 
-# ---- Оферта ----
+# ============================================================
+# ФУНКЦИИ ДЛЯ ОФЕРТЫ
+# ============================================================
+
 def has_agreed(user_id: int) -> bool:
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -201,7 +236,10 @@ def set_agreed(user_id: int) -> None:
     conn.commit()
     conn.close()
 
-# ---- Подписки ----
+# ============================================================
+# ФУНКЦИИ ДЛЯ ПОДПИСОК (PRO)
+# ============================================================
+
 def get_subscription(user_id: int) -> dict:
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -243,7 +281,10 @@ def get_all_active_subscriptions() -> list:
     conn.close()
     return [dict(row) for row in rows]
 
-# ---- Платежи ----
+# ============================================================
+# ФУНКЦИИ ДЛЯ ПЛАТЕЖЕЙ
+# ============================================================
+
 def save_payment(payment_id: str, user_id: int, amount: int, status: str, description: str):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -268,3 +309,46 @@ def get_payment(payment_id: str) -> dict:
     row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
+
+# ============================================================
+# ФУНКЦИИ ДЛЯ РЕФЕРАЛЬНОЙ СИСТЕМЫ
+# ============================================================
+
+def add_referral(referrer_id: int, referred_id: int) -> bool:
+    """
+    Добавляет реферальную связь.
+    Возвращает True, если связь успешно добавлена (реферал новый),
+    иначе False (например, пользователь уже был приглашён или ошибка).
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
+            (referrer_id, referred_id)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        # Пользователь уже был приглашён (уникальное ограничение)
+        conn.close()
+        return False
+
+def get_referral_count(user_id: int) -> int:
+    """Возвращает количество пользователей, которых пригласил данный пользователь."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else 0
+
+def get_referrer(user_id: int) -> int:
+    """Возвращает ID пользователя, который пригласил данного пользователя (referrer_id), или None."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT referrer_id FROM referrals WHERE referred_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None

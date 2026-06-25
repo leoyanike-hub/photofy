@@ -3,10 +3,14 @@ import os
 import json
 import time
 import random
+import sqlite3
 from datetime import datetime, timedelta
 from aiogram import Router, F, types, Bot
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, BufferedInputFile, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
+from aiogram.types import (
+    Message, CallbackQuery, BufferedInputFile, LabeledPrice,
+    PreCheckoutQuery, SuccessfulPayment, InlineKeyboardMarkup, InlineKeyboardButton
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
@@ -398,7 +402,7 @@ async def cb_buy_tokens(callback: CallbackQuery):
 async def cb_back_to_buy(callback: CallbackQuery):
     await cb_buy(callback)
 
-# === PRO подписка ===
+# === PRO подписка (выбор тарифа) ===
 @router.callback_query(F.data == "buy_pro_subscription")
 async def cb_buy_pro(callback: CallbackQuery):
     text = (
@@ -431,7 +435,6 @@ async def cb_select_pro_tariff(callback: CallbackQuery):
     title = f"PRO подписка на {days} дней"
     description = f"Ежедневное начисление {PRO_DAILY_BONUS} AI Coin в течение {days} дней."
 
-    # Уникальный идентификатор
     unique_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
     payload = f"sub_{days}d_{price}_{unique_id}"
     start_parameter = f"sub_{tariff_key}_{unique_id}"
@@ -483,7 +486,6 @@ async def send_invoice(callback: CallbackQuery, tariff_key: str):
     title = label
     description = f"Пополнение баланса на {coins} AI Coin."
 
-    # Уникальный идентификатор
     unique_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
     payload = f"pay_{tariff_key}_{coins}_{unique_id}"
     start_parameter = f"pay_{tariff_key}_{unique_id}"
@@ -535,7 +537,7 @@ async def cb_buy_960(callback: CallbackQuery):
 async def pre_checkout_query_handler(query: PreCheckoutQuery):
     await query.answer(ok=True)
 
-# === Обработка успешного платежа (с учётом уникального payload) ===
+# === Обработка успешного платежа (с учётом уникального payload и автопродления) ===
 @router.message(F.successful_payment)
 async def successful_payment_handler(message: Message):
     payment = message.successful_payment
@@ -543,7 +545,6 @@ async def successful_payment_handler(message: Message):
     user_id = message.from_user.id
 
     if payload.startswith("pay_"):
-        # Формат: pay_tariff_key_coins_unique
         parts = payload.split("_")
         if len(parts) >= 4:
             try:
@@ -562,7 +563,6 @@ async def successful_payment_handler(message: Message):
                 pass
         await message.answer("⚠️ Ошибка при начислении монет. Обратитесь к администратору.")
     elif payload.startswith("sub_"):
-        # Формат: sub_daysd_price_unique
         parts = payload.split("_")
         if len(parts) >= 4:
             try:
@@ -575,7 +575,7 @@ async def successful_payment_handler(message: Message):
                     "pro",
                     start_date.isoformat(),
                     end_date.isoformat(),
-                    auto_renew=False,
+                    auto_renew=True,   # автопродление включено по умолчанию
                     payment_id=f"sub_{user_id}_{int(datetime.now().timestamp())}"
                 )
                 db.add_credits(user_id, PRO_DAILY_BONUS)
@@ -585,7 +585,8 @@ async def successful_payment_handler(message: Message):
                     f"Длительность: {days} дней\n"
                     f"Действует до: {end_date.strftime('%d.%m.%Y')}\n"
                     f"Ежедневное начисление: {PRO_DAILY_BONUS} AI Coin.\n"
-                    f"Первый бонус уже начислен!",
+                    f"Первый бонус уже начислен!\n\n"
+                    f"🔄 Автопродление включено. Вы можете отменить его в разделе «Моя подписка».",
                     parse_mode="Markdown",
                     reply_markup=main_menu_keyboard()
                 )
@@ -595,6 +596,66 @@ async def successful_payment_handler(message: Message):
         await message.answer("⚠️ Ошибка при активации подписки. Обратитесь к администратору.")
     else:
         await message.answer("⚠️ Неизвестный тип платежа.")
+
+# ============================================================
+# === УПРАВЛЕНИЕ ПОДПИСКОЙ (Моя подписка, отмена автопродления) ===
+# ============================================================
+
+@router.callback_query(F.data == "my_subscription")
+async def cb_my_subscription(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    sub = db.get_subscription(user_id)
+    if not sub or not sub["is_active"]:
+        await callback.message.edit_text(
+            "🌟 *У вас нет активной PRO подписки.*\n\n"
+            "Оформите подписку, чтобы получать ежедневные бонусы и приоритетную генерацию.",
+            parse_mode="Markdown",
+            reply_markup=back_keyboard()
+        )
+        await callback.answer()
+        return
+    start_date = datetime.fromisoformat(sub["start_date"]).strftime("%d.%m.%Y")
+    end_date = datetime.fromisoformat(sub["end_date"]).strftime("%d.%m.%Y")
+    auto_renew_status = "✅ Включено" if sub.get("auto_renew") else "❌ Отключено"
+    text = (
+        f"🌟 *Ваша PRO подписка*\n\n"
+        f"Статус: ✅ Активна\n"
+        f"Дата начала: {start_date}\n"
+        f"Дата окончания: {end_date}\n"
+        f"Ежедневный бонус: {PRO_DAILY_BONUS} AI Coin\n"
+        f"Автопродление: {auto_renew_status}\n\n"
+        "Если автопродление включено, по окончании срока будет создан новый платёж.\n"
+        "Вы можете отключить автопродление в любой момент."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="❌ Отменить автопродление" if sub.get("auto_renew") else "✅ Включить автопродление",
+            callback_data="toggle_autorenew"
+        )],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+    ])
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data == "toggle_autorenew")
+async def cb_toggle_autorenew(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    sub = db.get_subscription(user_id)
+    if not sub or not sub["is_active"]:
+        await callback.answer("У вас нет активной подписки", show_alert=True)
+        return
+    new_status = not sub.get("auto_renew", False)
+    # Обновляем статус автопродления напрямую в БД
+    DATA_DIR = os.getenv('DATA_DIR', '/app/data')
+    DB_PATH = os.path.join(DATA_DIR, 'users.db')
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE subscriptions SET auto_renew = ? WHERE user_id = ?", (1 if new_status else 0, user_id))
+    conn.commit()
+    conn.close()
+    await callback.answer("Статус автопродления обновлён", show_alert=False)
+    # Возвращаемся в раздел подписки
+    await cb_my_subscription(callback)
 
 # ============================================================
 # === ЗАДАНИЕ: СКРИНШОТЫ (единственное задание) ===

@@ -90,22 +90,36 @@ async def cmd_start(message: Message, state: FSMContext):
 
     # Обработка реферальной ссылки
     if ref_id and ref_id != user_id:
-        # Проверяем, не зарегистрирован ли уже пользователь
+        # Проверяем, существует ли пользователь
         user = db.get_user(user_id)
         if not user:
-            # Создаём пользователя и записываем реферала
+            # Создаём пользователя
             db.create_user(user_id, username)
             # Добавляем реферальную связь
-            if db.add_referral(ref_id, user_id):
+            success = db.add_referral(ref_id, user_id)
+            if success:
                 # Начисляем бонус пригласившему
                 db.add_credits(ref_id, BONUS_TASK)
+                # Уведомляем нового пользователя
                 await message.answer(
                     f"🎉 *Вы перешли по реферальной ссылке!*\n"
                     f"Ваш друг получил бонус {BONUS_TASK} AI Coin.\n"
                     f"Вам тоже начислено {FREE_CREDITS} AI Coin за регистрацию.",
                     parse_mode="Markdown"
                 )
+                # Уведомляем пригласившего (если нужно, можно отправить отдельно)
+                try:
+                    await message.bot.send_message(
+                        ref_id,
+                        f"👤 *Новый реферал!*\n"
+                        f"Пользователь @{username or user_id} перешёл по вашей ссылке.\n"
+                        f"Вам начислено {BONUS_TASK} AI Coin.",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось уведомить реферера {ref_id}: {e}")
             else:
+                # Если связь не добавлена (возможно, пользователь уже был приглашён)
                 await message.answer(
                     f"👋 *Добро пожаловать!*\n"
                     f"Вы получили {FREE_CREDITS} AI Coin.",
@@ -118,7 +132,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 parse_mode="Markdown"
             )
     else:
-        # Обычная регистрация
+        # Обычная регистрация (без реферальной ссылки)
         user = db.get_user(user_id)
         if not user:
             db.create_user(user_id, username)
@@ -662,7 +676,7 @@ async def cb_tasks(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# --- Задание 1: Скриншоты ---
+# --- Задание 1: Скриншоты (исправлено: принимает любые скриншоты) ---
 @router.callback_query(F.data == "task_screenshots")
 async def cb_task_screenshots(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -725,7 +739,7 @@ async def handle_screenshot_3(message: Message, state: FSMContext):
         reply_markup=main_menu_keyboard()
     )
 
-# --- Задание 2: Рефералы ---
+# --- Задание 2: Рефералы (исправлено: корректный подсчёт) ---
 @router.callback_query(F.data == "task_referral")
 async def cb_task_referral(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id

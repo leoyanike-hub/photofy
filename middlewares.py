@@ -3,8 +3,13 @@ from aiogram import BaseMiddleware
 from aiogram.types import Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 from config import CHANNEL_ID
-import database as db
 from keyboards import subscription_keyboard
+import sqlite3
+import os
+
+# Путь к БД (если не определён в database, определяем здесь)
+DATA_DIR = os.getenv('DATA_DIR', '/app/data')
+DB_PATH = os.path.join(DATA_DIR, 'users.db')
 
 class SubscriptionMiddleware(BaseMiddleware):
     async def __call__(
@@ -18,17 +23,23 @@ class SubscriptionMiddleware(BaseMiddleware):
         if not bot:
             return await handler(event, data)
 
-        # Проверяем подписку
+        # Проверяем подписку через Telegram API
         try:
             chat_member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
             is_member = chat_member.status in ["member", "creator", "administrator"]
         except TelegramBadRequest:
             is_member = False
 
+        # Если подписан – проверяем и обновляем статус в БД
         if is_member:
-            # Если пользователь ещё не отмечен как подписанный – отмечаем (без начисления монет)
-            if not db.is_subscribed(user_id):
-                db.set_subscribed(user_id)
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT subscribed FROM users WHERE user_id = ?", (user_id,))
+            result = cursor.fetchone()
+            if not result or not result[0]:
+                cursor.execute("UPDATE users SET subscribed = 1 WHERE user_id = ?", (user_id,))
+                conn.commit()
+            conn.close()
             return await handler(event, data)
 
         # Не подписан – просим
